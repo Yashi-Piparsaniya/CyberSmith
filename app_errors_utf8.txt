@@ -1,0 +1,60 @@
+﻿To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/9.1.0/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+> Task :app:preBuild UP-TO-DATE
+> Task :app:preDebugBuild UP-TO-DATE
+> Task :app:generateDebugResources UP-TO-DATE
+> Task :app:packageDebugResources UP-TO-DATE
+> Task :app:processDebugNavigationResources UP-TO-DATE
+> Task :app:parseDebugLocalResources UP-TO-DATE
+> Task :app:generateDebugRFile UP-TO-DATE
+> Task :app:compileDebugKotlin
+.\gradlew.bat : e: file:///D:/Users/ya
+shi/CyberSmith/app/src/main/java/com/e
+xample/cybersmith/ui/screens/SettingsS
+creen.kt:113:59 Unresolved reference 
+'Color'.
+At line:1 char:1
++ .\gradlew.bat 
+:app:compileDebugKotlin --no-daemon 
+2>&1 | Out-File -Fi ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpec 
+   ified: (e: file:///D:/U...erence   
+  'Color'.:String) [], RemoteExcept   
+ ion
+    + FullyQualifiedErrorId : NativeC 
+   ommandError
+ 
+e: file:///D:/Users/yashi/CyberSmith/a
+pp/src/main/java/com/example/cybersmit
+h/ui/screens/SettingsScreen.kt:135:59 
+Unresolved reference 'Color'.
+
+> Task :app:compileDebugKotlin FAILED
+
+FAILURE: Build failed with an 
+exception.
+
+* What went wrong:
+Execution failed for task 
+':app:compileDebugKotlin'.
+> A failure occurred while executing o
+rg.jetbrains.kotlin.compilerRunner.Gra
+dleCompilerRunnerWithWorkers$GradleKot
+linCompilerWorkAction
+   > Compilation error. See log for 
+more details
+
+* Try:
+> Run with --stacktrace option to get 
+the stack trace.
+> Run with --info or --debug option 
+to get more log output.
+> Run with --scan to generate a Build 
+Scan (Powered by Develocity).
+> Get more help at 
+https://help.gradle.org.
+
+BUILD FAILED in 2m 18s
+6 actionable tasks: 1 executed, 5 up-to-date
