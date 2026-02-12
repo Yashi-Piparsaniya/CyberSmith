@@ -12,9 +12,15 @@ class SettingsManager(context: Context) {
         private const val KEY_PROTECTION_ENABLED = "protection_enabled"
         private const val KEY_VOICE_ALERTS = "voice_alerts"
         private const val KEY_HAPTIC_FEEDBACK = "haptic_feedback"
+        private const val KEY_VAPI_API_KEY = "vapi_api_key"
+        private const val KEY_VAPI_SCREENING_AGENT_ID = "vapi_screening_agent_id"
+        private const val KEY_VAPI_TAKEOVER_AGENT_ID = "vapi_takeover_agent_id"
         
-        const val DEFAULT_WS_URL = "ws://your-backend.com/ws/audio"
-        const val DEFAULT_AI_NUMBER = "+1234567890"
+        const val DEFAULT_WS_URL = "wss://api.vapi.ai"
+        const val DEFAULT_AI_NUMBER = "+19793418014"
+        const val DEFAULT_VAPI_API_KEY = "547befdc-a9de-4e5e-9e76-6b693b256228"
+        const val DEFAULT_VAPI_SCREENING_AGENT_ID = "548d630b-c654-4532-98e3-d28918b736d5"
+        const val DEFAULT_VAPI_TAKEOVER_AGENT_ID = "80ed987f-9d37-4bfe-aee1-87d6feb569a6"
     }
 
     var webSocketUrl: String
@@ -36,4 +42,16 @@ class SettingsManager(context: Context) {
     var hapticFeedbackEnabled: Boolean
         get() = prefs.getBoolean(KEY_HAPTIC_FEEDBACK, true)
         set(value) = prefs.edit().putBoolean(KEY_HAPTIC_FEEDBACK, value).apply()
+
+    var vapiApiKey: String
+        get() = prefs.getString(KEY_VAPI_API_KEY, DEFAULT_VAPI_API_KEY) ?: DEFAULT_VAPI_API_KEY
+        set(value) = prefs.edit().putString(KEY_VAPI_API_KEY, value).apply()
+
+    var vapiScreeningAgentId: String
+        get() = prefs.getString(KEY_VAPI_SCREENING_AGENT_ID, DEFAULT_VAPI_SCREENING_AGENT_ID) ?: DEFAULT_VAPI_SCREENING_AGENT_ID
+        set(value) = prefs.edit().putString(KEY_VAPI_SCREENING_AGENT_ID, value).apply()
+
+    var vapiTakeoverAgentId: String
+        get() = prefs.getString(KEY_VAPI_TAKEOVER_AGENT_ID, DEFAULT_VAPI_TAKEOVER_AGENT_ID) ?: DEFAULT_VAPI_TAKEOVER_AGENT_ID
+        set(value) = prefs.edit().putString(KEY_VAPI_TAKEOVER_AGENT_ID, value).apply()
 }

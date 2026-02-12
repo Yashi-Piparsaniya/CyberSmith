@@ -3,6 +3,9 @@ package com.example.cybersmith
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.app.role.RoleManager
+import android.content.Intent
+import android.telecom.TelecomManager
 import android.os.Build
 import android.os.Bundle
 import android.os.VibrationEffect
@@ -48,7 +51,9 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         Manifest.permission.RECORD_AUDIO,
         Manifest.permission.READ_PHONE_STATE,
         Manifest.permission.READ_CALL_LOG,
+        Manifest.permission.READ_CONTACTS,
         Manifest.permission.CALL_PHONE,
+        Manifest.permission.ANSWER_PHONE_CALLS,
     ).let {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             it + Manifest.permission.POST_NOTIFICATIONS
@@ -69,6 +74,8 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         
         tts = TextToSpeech(this, this)
         checkPermissions()
+        checkOverlayPermission()
+        checkDefaultDialer()
         
         if (intent.getBooleanExtra("EXTRA_FRAUD_ALERT", false)) {
             triggerAlert()
@@ -78,6 +85,45 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         setContent {
             CyberSmithTheme {
                 CyberSmithApp()
+            }
+        }
+    }
+
+    private fun checkDefaultDialer() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val roleManager = getSystemService(RoleManager::class.java)
+            if (roleManager != null && !roleManager.isRoleHeld(RoleManager.ROLE_DIALER)) {
+                val intent = roleManager.createRequestRoleIntent(RoleManager.ROLE_DIALER)
+                dialerRoleLauncher.launch(intent)
+            }
+        } else {
+            val telecomManager = getSystemService(Context.TELECOM_SERVICE) as TelecomManager
+            if (telecomManager.defaultDialerPackage != packageName) {
+                val intent = Intent(TelecomManager.ACTION_CHANGE_DEFAULT_DIALER).apply {
+                    putExtra(TelecomManager.EXTRA_CHANGE_DEFAULT_DIALER_PACKAGE_NAME, packageName)
+                }
+                startActivity(intent)
+            }
+        }
+    }
+
+    private val dialerRoleLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode != RESULT_OK) {
+            Toast.makeText(this, "Setting app as default dialer is recommended for full protection", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun checkOverlayPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            if (!android.provider.Settings.canDrawOverlays(this)) {
+                val intent = android.content.Intent(
+                    android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    android.net.Uri.parse("package:$packageName")
+                )
+                startActivity(intent)
+                Toast.makeText(this, "Please allow overlay permission for fraud alerts", Toast.LENGTH_LONG).show()
             }
         }
     }

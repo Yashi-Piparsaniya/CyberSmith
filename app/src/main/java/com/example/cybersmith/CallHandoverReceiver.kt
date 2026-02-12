@@ -38,7 +38,7 @@ class CallHandoverReceiver : BroadcastReceiver() {
         const val ACTION_HANDOVER_TO_AI = "com.example.cybersmith.action.HANDOVER_TO_AI"
         const val EXTRA_AI_NUMBER = "extra_ai_number"
         
-        // TODO: Replace with actual AI assistant phone number
-        const val DEFAULT_AI_NUMBER = "+1234567890"
+        // This is a placeholder; ensure the Vapi-attached phone number is entered in settings
+        const val DEFAULT_AI_NUMBER = "+19793418014"
     }
 }

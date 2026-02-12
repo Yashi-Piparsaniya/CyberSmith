@@ -25,6 +25,8 @@ import com.example.cybersmith.data.model.CallLogRecord
 import com.example.cybersmith.model.FraudDetectionResult
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.*
 import okio.ByteString.Companion.toByteString
 import java.util.Locale
@@ -115,7 +117,7 @@ class CallDetectionService : Service(), TextToSpeech.OnInitListener {
 
             try {
                 audioRecord = AudioRecord(
-                    MediaRecorder.AudioSource.MIC,
+                    MediaRecorder.AudioSource.VOICE_COMMUNICATION,
                     SAMPLE_RATE,
                     AudioFormat.CHANNEL_IN_MONO,
                     AudioFormat.ENCODING_PCM_16BIT,
@@ -127,14 +129,21 @@ class CallDetectionService : Service(), TextToSpeech.OnInitListener {
                     return@launch
                 }
 
-                audioRecord?.startRecording()
+                Log.d(TAG, "AudioRecord started. Buffer size: $bufferSize")
                 val buffer = ByteArray(bufferSize)
-
+                audioRecord?.startRecording()
+                
                 while (isRecording) {
                     val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
                     if (read > 0) {
-                        val audioData = buffer.copyOfRange(0, read).toByteString()
-                        webSocket?.send(audioData)
+                        // Vapi supports binary audio streaming directly.
+                        if (webSocket != null) {
+                            webSocket?.send(buffer.toByteString(0, read))
+                            // Log periodically (every ~1 second of audio at 16khz/16bit/mono)
+                            // 16000 * 2 = 32000 bytes per sec. 
+                        }
+                    } else if (read < 0) {
+                        Log.e(TAG, "AudioRecord read error: $read")
                     }
                 }
             } catch (e: SecurityException) {
@@ -146,40 +155,115 @@ class CallDetectionService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun connectWebSocket() {
-        val request = Request.Builder().url(settingsManager.webSocketUrl).build()
+        val request = Request.Builder()
+            .url(settingsManager.webSocketUrl)
+            .addHeader("Authorization", "Bearer ${settingsManager.vapiApiKey}")
+            .build()
+            
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                Log.d(TAG, "WebSocket Opened")
+                Log.d(TAG, "WebSocket Opened to Vapi. Response: ${response.message}")
+                updateStatusNotification("Vapi Connected")
+                
+                // Start session with Setup message (Client SDK style)
+                // We add explicit audio config to ensure Vapi knows the format
+                val setupMessage = """
+                    {
+                        "type": "setup",
+                        "assistantId": "${settingsManager.vapiScreeningAgentId}",
+                        "publicKey": "${settingsManager.vapiApiKey}",
+                        "inputFormat": {
+                            "sampleRate": 16000,
+                            "encoding": "linear16",
+                            "container": "raw",
+                            "channels": 1
+                        }
+                    }
+                """.trimIndent()
+                Log.d(TAG, "Sending Setup: $setupMessage")
+                webSocket.send(setupMessage)
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                Log.d(TAG, "Message from server: $text")
-                handleFraudDetectionResponse(text)
+                Log.d(TAG, "VAPI MSG: $text") // Log every message for debugging
+                handleVapiMessage(text)
             }
 
-            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                Log.e(TAG, "WebSocket Failure: ${t.message}")
+        override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+            Log.e(TAG, "WebSocket Failure: ${t.message}", t)
+            response?.let {
+                Log.e(TAG, "Failure Response: ${it.code} ${it.message}")
+                try {
+                    Log.e(TAG, "Failure Body: ${it.body?.string()}")
+                } catch (e: Exception) {}
+            }
+            updateStatusNotification("Vapi Connection Failed")
+        }
+
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                Log.w(TAG, "WebSocket Closing: $code / $reason")
+                updateStatusNotification("Vapi Disconnecting")
+            }
+
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                Log.w(TAG, "WebSocket Closed: $code / $reason")
+                updateStatusNotification("Vapi Disconnected")
             }
         })
     }
-
-    private fun handleFraudDetectionResponse(responseText: String) {
+    
+    private fun handleVapiMessage(text: String) {
         try {
-            val result = json.decodeFromString<FraudDetectionResult>(responseText)
-            if (result.isFraud) {
-                Log.w(TAG, "FRAUD DETECTED! Confidence: ${result.confidence}, Reason: ${result.reason}")
-                updateLogAndTriggerAlert(result)
-            } else {
-                updateLogStatus("SAFE")
+            val messageJson = json.parseToJsonElement(text)
+            val type = messageJson.jsonObject["type"]?.jsonPrimitive?.content
+            
+            if (type == "transcript") {
+                val transcriptObj = messageJson.jsonObject["transcript"]?.jsonObject
+                val transcript = if (transcriptObj != null) {
+                    transcriptObj["transcript"]?.jsonPrimitive?.content ?: ""
+                } else {
+                    messageJson.jsonObject["transcript"]?.jsonPrimitive?.content ?: ""
+                }
+                
+                if (transcript.isNotEmpty()) {
+                    Log.d(TAG, "Captured Transcript: $transcript")
+                    
+                    // Simple keyword detection for fraud alerts in transcript
+                    // Using case-insensitive check and also searching for common scam keywords
+                    val scamKeywords = listOf("Warning", "चेतावनी", "OTAC", "OTP", "Bank", "Police", "Account", "Verify")
+                    if (scamKeywords.any { transcript.contains(it, ignoreCase = true) }) {
+                        Log.w(TAG, "Scam keyword detected in transcript!")
+                        updateLogAndTriggerAlert(FraudDetectionResult(
+                            isFraud = true, 
+                            confidence = 0.9f, 
+                            reason = "Scam pattern detected: $transcript"
+                        ))
+                    }
+                }
+            } else if (type == "speech-update") {
+                // Speech updates can tell us if Vapi is hearing something
+                Log.d(TAG, "Vapi Speech Update: $text")
+            } else if (type == "error") {
+                Log.e(TAG, "Vapi Reported Error: $text")
             }
         } catch (e: Exception) {
-            if (responseText.contains("FRAUD", ignoreCase = true)) {
-                updateLogAndTriggerAlert(FraudDetectionResult(isFraud = true, confidence = 1f))
-            } else {
-                updateLogStatus("SAFE")
-            }
-            Log.e(TAG, "Error parsing fraud response: ${e.message}")
+            Log.e(TAG, "Error parsing Vapi message: ${e.message}")
         }
+        
+        // Also check for error messages from Vapi
+        try {
+            val messageJson = json.parseToJsonElement(text)
+            val type = messageJson.jsonObject["type"]?.jsonPrimitive?.content
+            if (type == "error") {
+                val error = messageJson.jsonObject["error"]?.jsonPrimitive?.content ?: "Unknown error"
+                Log.e(TAG, "Vapi Error: $error")
+            }
+        } catch (e: Exception) {}
+    }
+
+    private fun updateStatusNotification(status: String) {
+        val notificationManager = getSystemService(NotificationManager::class.java)
+        notificationManager.notify(NOTIFICATION_ID, createNotification(status))
     }
 
     private fun updateLogStatus(status: String) {
@@ -365,10 +449,10 @@ class CallDetectionService : Service(), TextToSpeech.OnInitListener {
         }
     }
 
-    private fun createNotification(): Notification {
+    private fun createNotification(status: String = "Monitoring for fraud..."): Notification {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("CyberSmith Call Protection")
-            .setContentText("Monitoring for fraud...")
+            .setContentText(status)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
