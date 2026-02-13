@@ -13,3 +13,5 @@
 .externalNativeBuild
 .cxx
 local.properties
+# ML Models
+app/src/main/assets/*.tflite
