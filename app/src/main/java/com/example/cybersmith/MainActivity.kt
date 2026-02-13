@@ -21,18 +21,23 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
@@ -77,14 +82,19 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         checkOverlayPermission()
         checkDefaultDialer()
         
+        var showFraudDialog by mutableStateOf(false)
         if (intent.getBooleanExtra("EXTRA_FRAUD_ALERT", false)) {
             triggerAlert()
+            showFraudDialog = true
         }
 
         enableEdgeToEdge()
         setContent {
             CyberSmithTheme {
-                CyberSmithApp()
+                CyberSmithApp(
+                    showFraudDialog = showFraudDialog,
+                    onDismissDialog = { showFraudDialog = false }
+                )
             }
         }
     }
@@ -172,8 +182,32 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 }
 
 @Composable
-fun CyberSmithApp() {
+fun CyberSmithApp(showFraudDialog: Boolean = false, onDismissDialog: () -> Unit = {}) {
     var currentDestination by rememberSaveable { mutableStateOf(AppDestinations.HOME) }
+    
+    if (showFraudDialog) {
+        AlertDialog(
+            onDismissRequest = onDismissDialog,
+            title = { 
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Warning, contentDescription = null, tint = Danger)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Fraud Alert!")
+                }
+            },
+            text = { 
+                Text("We've detected suspicious activity on your current call. Please exercise extreme caution.")
+            },
+            confirmButton = {
+                Button(onClick = onDismissDialog, colors = ButtonDefaults.buttonColors(containerColor = Danger)) {
+                    Text("I'll be careful")
+                }
+            },
+            containerColor = SurfaceDark,
+            titleContentColor = Danger,
+            textContentColor = TextPrimary
+        )
+    }
 
     Scaffold(
         bottomBar = {

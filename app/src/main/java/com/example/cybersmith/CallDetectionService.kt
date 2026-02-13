@@ -185,7 +185,7 @@ class CallDetectionService : Service(), TextToSpeech.OnInitListener {
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                Log.d(TAG, "VAPI MSG: $text") // Log every message for debugging
+                Log.v(TAG, "VAPI MSG: $text") // Use verbose for high volume if needed, but Log.d is fine for now
                 handleVapiMessage(text)
             }
 
@@ -240,6 +240,24 @@ class CallDetectionService : Service(), TextToSpeech.OnInitListener {
                         ))
                     }
                 }
+            } else if (type == "FRAUD_ALERT") {
+                val keywords = messageJson.jsonObject["keywords"]?.let {
+                    if (it is kotlinx.serialization.json.JsonArray) {
+                        it.map { k -> k.jsonPrimitive.content }.joinToString(", ")
+                    } else {
+                        it.jsonPrimitive.content
+                    }
+                } ?: "Unknown"
+                val severity = messageJson.jsonObject["severity"]?.jsonPrimitive?.content ?: "UNKNOWN"
+                val transcript = messageJson.jsonObject["transcript"]?.jsonPrimitive?.content ?: ""
+                
+                Log.w(TAG, "FRAUD_ALERT received: Severity=$severity, Keywords=$keywords")
+                
+                updateLogAndTriggerAlert(FraudDetectionResult(
+                    isFraud = true,
+                    confidence = if (severity == "HIGH") 0.95f else 0.8f,
+                    reason = "Server Alert ($severity): Detected $keywords in '$transcript'"
+                ))
             } else if (type == "speech-update") {
                 // Speech updates can tell us if Vapi is hearing something
                 Log.d(TAG, "Vapi Speech Update: $text")
@@ -299,6 +317,13 @@ class CallDetectionService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun triggerFraudAlert(result: FraudDetectionResult) {
+        // 0. Broadcast for active UI components
+        val intent = Intent(ACTION_FRAUD_DETECTED).apply {
+            putExtra(EXTRA_FRAUD_REASON, result.reason)
+            putExtra(EXTRA_FRAUD_CONFIDENCE, result.confidence)
+        }
+        sendBroadcast(intent)
+
         // 1. Vibrate
         triggerVibration()
         
@@ -468,6 +493,9 @@ class CallDetectionService : Service(), TextToSpeech.OnInitListener {
         
         const val ACTION_START_RECORDING = "com.example.cybersmith.action.START_RECORDING"
         const val ACTION_STOP_RECORDING = "com.example.cybersmith.action.STOP_RECORDING"
+        const val ACTION_FRAUD_DETECTED = "com.example.cybersmith.action.FRAUD_DETECTED"
         const val EXTRA_PHONE_NUMBER = "com.example.cybersmith.extra.PHONE_NUMBER"
+        const val EXTRA_FRAUD_REASON = "com.example.cybersmith.extra.FRAUD_REASON"
+        const val EXTRA_FRAUD_CONFIDENCE = "com.example.cybersmith.extra.FRAUD_CONFIDENCE"
     }
 }

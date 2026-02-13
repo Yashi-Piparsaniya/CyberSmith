@@ -16,7 +16,7 @@ class SettingsManager(context: Context) {
         private const val KEY_VAPI_SCREENING_AGENT_ID = "vapi_screening_agent_id"
         private const val KEY_VAPI_TAKEOVER_AGENT_ID = "vapi_takeover_agent_id"
         
-        const val DEFAULT_WS_URL = "wss://api.vapi.ai"
+        const val DEFAULT_WS_URL = "wss://detectscam.onrender.com"
         const val DEFAULT_AI_NUMBER = "+19793418014"
         const val DEFAULT_VAPI_API_KEY = "547befdc-a9de-4e5e-9e76-6b693b256228"
         const val DEFAULT_VAPI_SCREENING_AGENT_ID = "548d630b-c654-4532-98e3-d28918b736d5"

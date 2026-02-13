@@ -1,4 +1,6 @@
 package com.example.cybersmith
+ 
+ import androidx.core.content.ContextCompat
 
 import android.os.Build
 import android.os.Bundle
@@ -23,11 +25,29 @@ import com.example.cybersmith.ui.theme.CyberSmithTheme
 import com.example.cybersmith.ui.theme.Primary
 import com.example.cybersmith.ui.theme.SurfaceDark
 
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.text.font.FontWeight
+
 class InCallActivity : ComponentActivity() {
 
     private var callState by mutableIntStateOf(Call.STATE_RINGING)
     private var isSpeakerOn by mutableStateOf(false)
     private var callerName by mutableStateOf<String?>(null)
+    private var isFraudWarningVisible by mutableStateOf(false)
+    private var fraudReason by mutableStateOf<String?>(null)
+
+    private val fraudBroadcastReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == CallDetectionService.ACTION_FRAUD_DETECTED) {
+                isFraudWarningVisible = true
+                fraudReason = intent.getStringExtra(CallDetectionService.EXTRA_FRAUD_REASON)
+            }
+        }
+    }
     
     private val callCallback = object : Call.Callback() {
         override fun onStateChanged(call: Call, state: Int) {
@@ -54,6 +74,15 @@ class InCallActivity : ComponentActivity() {
         val number = call.details.handle?.schemeSpecificPart
         callerName = ContactHelper.getContactName(this, number)
 
+        // Register for fraud alerts
+        val filter = IntentFilter(CallDetectionService.ACTION_FRAUD_DETECTED)
+        ContextCompat.registerReceiver(
+            this,
+            fraudBroadcastReceiver,
+            filter,
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+
         setContent {
             CyberSmithTheme {
                 InCallScreen(
@@ -61,6 +90,8 @@ class InCallActivity : ComponentActivity() {
                     contactName = callerName,
                     state = callState,
                     isSpeakerOn = isSpeakerOn,
+                    isFraudVisible = isFraudWarningVisible,
+                    fraudReason = fraudReason,
                     onAnswer = { 
                         call.answer(VideoProfile.STATE_AUDIO_ONLY) 
                     },
@@ -91,6 +122,9 @@ class InCallActivity : ComponentActivity() {
 
     override fun onDestroy() {
         AppInCallService.currentCall?.unregisterCallback(callCallback)
+        try {
+            unregisterReceiver(fraudBroadcastReceiver)
+        } catch (e: Exception) {}
         super.onDestroy()
     }
 }
@@ -101,6 +135,8 @@ fun InCallScreen(
     contactName: String?,
     state: Int,
     isSpeakerOn: Boolean,
+    isFraudVisible: Boolean = false,
+    fraudReason: String? = null,
     onAnswer: () -> Unit,
     onReject: () -> Unit,
     onToggleSpeaker: () -> Unit
@@ -154,6 +190,38 @@ fun InCallScreen(
                     color = Primary,
                     modifier = Modifier.padding(top = 8.dp)
                 )
+
+                if (isFraudVisible) {
+                    Spacer(modifier = Modifier.height(24.dp))
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFFF44336).copy(alpha = 0.9f)),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.Warning, contentDescription = null, tint = Color.White)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    "FRAUD DETECTED",
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 18.sp
+                                )
+                            }
+                            Text(
+                                text = fraudReason ?: "Suspicious activity detected on this call.",
+                                color = Color.White,
+                                fontSize = 14.sp,
+                                modifier = Modifier.padding(top = 4.dp),
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            )
+                        }
+                    }
+                }
             }
 
             Column(

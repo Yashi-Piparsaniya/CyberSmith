@@ -124,12 +124,21 @@ fun CallLogItem(log: CallLogRecord) {
             }
             
             if (isFraud) {
-                Text(
-                    text = "BLOCKED",
-                    color = Danger,
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold
-                )
+                Column(horizontalAlignment = Alignment.End) {
+                    Text(
+                        text = "BLOCKED",
+                        color = Danger,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    log.reason?.let {
+                        Text(
+                            text = it.take(20) + if (it.length > 20) "..." else "",
+                            color = TextMuted,
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                }
             }
         }
     }
