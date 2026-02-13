@@ -144,7 +144,24 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         }
         if (missingPermissions.isNotEmpty()) {
             permissionLauncher.launch(missingPermissions.toTypedArray())
+        } else {
+            // Only check accessibility if basic permissions are granted
+            checkAccessibilityService()
         }
+    }
+
+    private fun checkAccessibilityService() {
+        if (!isAccessibilityServiceEnabled()) {
+            Toast.makeText(this, "Please enable CyberSmith Accessibility Service for call protection", Toast.LENGTH_LONG).show()
+            val intent = Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
+            startActivity(intent)
+        }
+    }
+
+    private fun isAccessibilityServiceEnabled(): Boolean {
+        val accessibilityManager = getSystemService(Context.ACCESSIBILITY_SERVICE) as android.view.accessibility.AccessibilityManager
+        val enabledServices = accessibilityManager.getEnabledAccessibilityServiceList(android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
+        return enabledServices.any { it.resolveInfo.serviceInfo.packageName == packageName }
     }
 
     private fun triggerAlert() {

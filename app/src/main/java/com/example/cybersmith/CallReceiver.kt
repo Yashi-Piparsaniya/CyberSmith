@@ -23,6 +23,7 @@ class CallReceiver : BroadcastReceiver() {
                 }
                 TelephonyManager.EXTRA_STATE_IDLE -> {
                     Log.d("CallReceiver", "Call Ended")
+                    // Use a slightly more robust way to stop if we were just ringing or offhook
                     stopService(context)
                 }
             }

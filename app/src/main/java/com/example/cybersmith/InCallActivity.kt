@@ -45,9 +45,16 @@ class InCallActivity : ComponentActivity() {
             if (intent?.action == CallDetectionService.ACTION_FRAUD_DETECTED) {
                 isFraudWarningVisible = true
                 fraudReason = intent.getStringExtra(CallDetectionService.EXTRA_FRAUD_REASON)
+            } else if (intent?.action == CallDetectionService.ACTION_TRANSCRIPT_UPDATE) {
+                val transcript = intent.getStringExtra(CallDetectionService.EXTRA_TRANSCRIPT)
+                if (!transcript.isNullOrEmpty()) {
+                    currentTranscript = transcript
+                }
             }
         }
     }
+    
+    private var currentTranscript by mutableStateOf("")
     
     private val callCallback = object : Call.Callback() {
         override fun onStateChanged(call: Call, state: Int) {
@@ -74,8 +81,11 @@ class InCallActivity : ComponentActivity() {
         val number = call.details.handle?.schemeSpecificPart
         callerName = ContactHelper.getContactName(this, number)
 
-        // Register for fraud alerts
-        val filter = IntentFilter(CallDetectionService.ACTION_FRAUD_DETECTED)
+        // Register for fraud alerts and transcripts
+        val filter = IntentFilter().apply {
+            addAction(CallDetectionService.ACTION_FRAUD_DETECTED)
+            addAction(CallDetectionService.ACTION_TRANSCRIPT_UPDATE)
+        }
         ContextCompat.registerReceiver(
             this,
             fraudBroadcastReceiver,
@@ -92,6 +102,7 @@ class InCallActivity : ComponentActivity() {
                     isSpeakerOn = isSpeakerOn,
                     isFraudVisible = isFraudWarningVisible,
                     fraudReason = fraudReason,
+                    transcript = currentTranscript,
                     onAnswer = { 
                         call.answer(VideoProfile.STATE_AUDIO_ONLY) 
                     },
@@ -137,6 +148,7 @@ fun InCallScreen(
     isSpeakerOn: Boolean,
     isFraudVisible: Boolean = false,
     fraudReason: String? = null,
+    transcript: String = "",
     onAnswer: () -> Unit,
     onReject: () -> Unit,
     onToggleSpeaker: () -> Unit
@@ -218,6 +230,33 @@ fun InCallScreen(
                                 fontSize = 14.sp,
                                 modifier = Modifier.padding(top = 4.dp),
                                 textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            )
+                        }
+                    }
+                }
+                
+                // Live Transcript Display
+                if (transcript.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = Color.Black.copy(alpha = 0.6f)),
+                        shape = RoundedCornerShape(16.dp),
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Text(
+                                text = "Live Captions",
+                                color = Color.Gray,
+                                fontSize = 12.sp,
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                            Text(
+                                text = transcript,
+                                color = Color.White,
+                                fontSize = 14.sp,
+                                lineHeight = 18.sp,
+                                maxLines = 3,
+                                modifier = Modifier.padding(top = 4.dp)
                             )
                         }
                     }

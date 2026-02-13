@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">CyberSmith</string>
+    <string name="accessibility_service_description">CyberSmith uses accessibility services to detect active calls and provide real-time fraud protection by analyzing audio for potential threats.</string>
 </resources>

@@ -39,8 +39,15 @@ class CallDetectionService : Service(), TextToSpeech.OnInitListener {
     private var webSocket: WebSocket? = null
     private var tts: TextToSpeech? = null
     private var isTtsReady = false
+    private var wakeLock: android.os.PowerManager.WakeLock? = null
     
-    private val client = OkHttpClient()
+    private val client = OkHttpClient.Builder()
+        .readTimeout(0, java.util.concurrent.TimeUnit.MILLISECONDS) // Disable read timeout for WebSockets
+        .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+        .writeTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+        .pingInterval(30, java.util.concurrent.TimeUnit.SECONDS) // Keep connection alive
+        .retryOnConnectionFailure(true)
+        .build()
     private val json = Json { ignoreUnknownKeys = true }
     
     // Persistence
@@ -48,6 +55,7 @@ class CallDetectionService : Service(), TextToSpeech.OnInitListener {
     private lateinit var callLogDao: com.example.cybersmith.data.db.CallLogDao
     private var currentCallLogId: Int = -1
     private var currentPhoneNumber: String = "Unknown"
+    private var fraudPopupShown = false
 
     override fun onCreate() {
         super.onCreate()
@@ -61,9 +69,6 @@ class CallDetectionService : Service(), TextToSpeech.OnInitListener {
         // Initialize persistence
         settingsManager = SettingsManager(this)
         callLogDao = CallLogDatabase.getDatabase(this).callLogDao()
-        
-        // Initialize TTS
-        tts = TextToSpeech(this, this)
     }
 
     override fun onInit(status: Int) {
@@ -81,7 +86,22 @@ class CallDetectionService : Service(), TextToSpeech.OnInitListener {
         val phoneNumber = intent?.getStringExtra(EXTRA_PHONE_NUMBER) ?: "Unknown"
         
         if (action == ACTION_START_RECORDING) {
-            currentPhoneNumber = phoneNumber
+            // Update phone number if it's currently Unknown and we just got a real one
+            if (phoneNumber != "Unknown" && (currentPhoneNumber == "Unknown" || currentPhoneNumber.isEmpty())) {
+                currentPhoneNumber = phoneNumber
+                updateLogWithPhoneNumber(phoneNumber)
+            } else if (currentPhoneNumber == "Unknown" || currentPhoneNumber.isEmpty()) {
+                currentPhoneNumber = phoneNumber
+            }
+            
+            // Reset fraud popup flag for new call
+            fraudPopupShown = false
+            
+            // Initialize TTS only when we actually start recording
+            if (tts == null) {
+                tts = TextToSpeech(this, this)
+            }
+            
             startRecordingAndStreaming()
         } else if (action == ACTION_STOP_RECORDING) {
             stopRecordingAndStreaming()
@@ -91,33 +111,64 @@ class CallDetectionService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun startRecordingAndStreaming() {
-        if (isRecording) return
+        if (isRecording) {
+            Log.d(TAG, "Already recording, ignoring start request")
+            return
+        }
         isRecording = true
+        Log.d(TAG, "--- Starting Recording and Streaming ---")
+
+        // Acquire WakeLock
+        try {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+            wakeLock = powerManager.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "CyberSmith::CallDetectionWakeLock")
+            wakeLock?.acquire(10*60*1000L /*10 minutes*/)
+            Log.d(TAG, "WakeLock acquired")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error acquiring WakeLock: ${e.message}")
+        }
         
-        // Log start of call in database
-        serviceScope.launch {
-            val record = CallLogRecord(
-                phoneNumber = currentPhoneNumber,
-                direction = "INCOMING",
-                status = "UNKNOWN"
-            )
-            val id = callLogDao.insertLog(record)
-            currentCallLogId = id.toInt()
-            Log.d(TAG, "Logged call start in DB with ID: $currentCallLogId")
+        // Log start of call in database ONLY if we don't have an active log ID
+        if (currentCallLogId == -1) {
+            serviceScope.launch {
+                try {
+                    val record = CallLogRecord(
+                        phoneNumber = currentPhoneNumber,
+                        direction = "INCOMING",
+                        status = "UNKNOWN"
+                    )
+                    val id = callLogDao.insertLog(record)
+                    currentCallLogId = id.toInt()
+                    Log.d(TAG, "Logged call start in DB with ID: $currentCallLogId for $currentPhoneNumber")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error logging call start: ${e.message}")
+                }
+            }
         }
         
         connectWebSocket()
         
         serviceScope.launch {
-            val bufferSize = AudioRecord.getMinBufferSize(
-                SAMPLE_RATE,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT
-            )
-
+            Log.d(TAG, "Recording coroutine launched")
             try {
+                val minBufferSize = AudioRecord.getMinBufferSize(
+                    SAMPLE_RATE,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT
+                )
+                
+                Log.d(TAG, "Min buffer size: $minBufferSize")
+                if (minBufferSize == AudioRecord.ERROR || minBufferSize == AudioRecord.ERROR_BAD_VALUE) {
+                    Log.e(TAG, "Invalid min buffer size: $minBufferSize")
+                    return@launch
+                }
+                
+                // Use a larger buffer for stability
+                val bufferSize = minBufferSize * 2
+                Log.d(TAG, "Using buffer size: $bufferSize")
+
                 audioRecord = AudioRecord(
-                    MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                    MediaRecorder.AudioSource.VOICE_COMMUNICATION, // Changed to VOICE_COMMUNICATION (7) for better echo cancellation and in-call access
                     SAMPLE_RATE,
                     AudioFormat.CHANNEL_IN_MONO,
                     AudioFormat.ENCODING_PCM_16BIT,
@@ -125,39 +176,116 @@ class CallDetectionService : Service(), TextToSpeech.OnInitListener {
                 )
 
                 if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
-                    Log.e(TAG, "AudioRecord initialization failed")
+                    Log.e(TAG, "AudioRecord initialization failed. State: ${audioRecord?.state}")
                     return@launch
                 }
+                
+                // Initialize Whisper Engine
+                val whisperEngine = com.example.cybersmith.ml.WhisperEngine(this@CallDetectionService)
+                val whisperReady = whisperEngine.initialize()
+                if (!whisperReady) {
+                    Log.w(TAG, "Whisper Engine failed to initialize. Falling back to Vapi/Cloud streaming or no-op.")
+                    updateStatusNotification("Local AI Model Missing (Check Assets)")
+                } else {
+                    updateStatusNotification("Local AI Listening...")
+                }
 
-                Log.d(TAG, "AudioRecord started. Buffer size: $bufferSize")
-                val buffer = ByteArray(bufferSize)
+                Log.d(TAG, "AudioRecord initialized. Starting recording...")
                 audioRecord?.startRecording()
+                
+                if (audioRecord?.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                    Log.e(TAG, "AudioRecord failed to start recording. State: ${audioRecord?.recordingState}")
+                    return@launch
+                }
+                
+                Log.d(TAG, "AudioRecord is now recording. Entering read loop...")
+                val buffer = ByteArray(bufferSize)
+                var totalBytesSent = 0L
+                var lastLogTime = System.currentTimeMillis()
+                
+                // Accumulation buffer for Whisper (approx 4 seconds of audio at 16kHz)
+                // 4 * 16000 = 64000 samples
+                val WHISPER_WINDOW_SECONDS = 4
+                val WHISPER_SAMPLE_COUNT = WHISPER_WINDOW_SECONDS * SAMPLE_RATE
+                val accumulationBuffer = FloatArray(WHISPER_SAMPLE_COUNT)
+                var accumulationIndex = 0
                 
                 while (isRecording) {
                     val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
                     if (read > 0) {
-                        // Vapi supports binary audio streaming directly.
-                        if (webSocket != null) {
-                            webSocket?.send(buffer.toByteString(0, read))
-                            // Log periodically (every ~1 second of audio at 16khz/16bit/mono)
-                            // 16000 * 2 = 32000 bytes per sec. 
+                        // Calculate RMS to check for silence
+                        var sum = 0.0
+                        for (i in 0 until read step 2) {
+                            val sample = (buffer[i].toInt() and 0xFF) or (buffer[i + 1].toInt() shl 8)
+                            val normalized = sample.toShort() / 32768.0
+                            sum += normalized * normalized
                         }
+                        val rms = Math.sqrt(sum / (read / 2))
+                        val db = if (rms > 0) 20 * Math.log10(rms) else -100.0
+                        
+                        if (webSocket != null && whisperReady) {
+                             // Convert current chunk to Float and append to accumulation buffer
+                             val samplesRead = read / 2
+                             for (i in 0 until samplesRead) {
+                                 if (accumulationIndex < WHISPER_SAMPLE_COUNT) {
+                                     val sample = (buffer[i*2].toInt() and 0xFF) or (buffer[i*2 + 1].toInt() shl 8)
+                                     accumulationBuffer[accumulationIndex++] = sample.toShort() / 32768.0f
+                                 }
+                             }
+                             
+                             // If buffer is full, run inference triggers
+                             if (accumulationIndex >= WHISPER_SAMPLE_COUNT) {
+                                 Log.d(TAG, "Whisper Buffer Full ($accumulationIndex samples). Running Inference...")
+                                 
+                                 // Run Inference on the packet
+                                 val text = whisperEngine.transcribe(accumulationBuffer)
+                                 
+                                 if (text.isNotEmpty() && !text.contains("not fully implemented")) {
+                                     val jsonMessage = """
+                                         {
+                                             "type": "transcript_update",
+                                             "text": "$text"
+                                         }
+                                     """.trimIndent()
+                                     webSocket?.send(jsonMessage)
+                                     Log.d(TAG, "Sent Local Transcript Packet: $text")
+                                 }
+                                 
+                                 // Reset buffer (Simple non-overlapping window for now)
+                                 accumulationIndex = 0
+                                 // Optional: Arrays.fill(accumulationBuffer, 0f) - not strictly needed as we overwrite
+                             }
+                        }
+
+                        // Log every 2 seconds
+                        val now = System.currentTimeMillis()
+                        if (now - lastLogTime > 2000) {
+                             Log.d(TAG, "Audio stats: RMS: %.2f (%.1f dB). Read: $read. Buffer: $accumulationIndex/$WHISPER_SAMPLE_COUNT".format(rms, db))
+                             lastLogTime = now
+                        }
+
                     } else if (read < 0) {
-                        Log.e(TAG, "AudioRecord read error: $read")
+                        Log.e(TAG, "AudioRecord read error code: $read")
+                        break
                     }
                 }
-            } catch (e: SecurityException) {
-                Log.e(TAG, "Permission denied for recording: ${e.message}")
+                whisperEngine.close()
+                Log.d(TAG, "Exited recording loop.")
+            } catch (e: Exception) {
+                Log.e(TAG, "Exception in recording coroutine: ${e.message}", e)
             } finally {
+                Log.d(TAG, "Cleaning up recording internal...")
                 stopRecordingInternal()
             }
         }
     }
 
     private fun connectWebSocket() {
+        // Vapi Client SDK connects with api_key in query param
+        val url = "${settingsManager.webSocketUrl}?api_key=${settingsManager.vapiApiKey}"
+        
         val request = Request.Builder()
-            .url(settingsManager.webSocketUrl)
-            .addHeader("Authorization", "Bearer ${settingsManager.vapiApiKey}")
+            .url(url)
             .build()
             
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
@@ -185,7 +313,7 @@ class CallDetectionService : Service(), TextToSpeech.OnInitListener {
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                Log.v(TAG, "VAPI MSG: $text") // Use verbose for high volume if needed, but Log.d is fine for now
+                Log.d(TAG, "VAPI MSG: $text") // Changed to Debug level to ensure we see it
                 handleVapiMessage(text)
             }
 
@@ -198,6 +326,17 @@ class CallDetectionService : Service(), TextToSpeech.OnInitListener {
                 } catch (e: Exception) {}
             }
             updateStatusNotification("Vapi Connection Failed")
+            
+            if (isRecording) {
+                Log.w(TAG, "Connection lost while recording. Reconnecting in 3s...")
+                serviceScope.launch {
+                    delay(3000)
+                    if (isRecording) {
+                        Log.d(TAG, "Reconnecting WebSocket now...")
+                        connectWebSocket()
+                    }
+                }
+            }
         }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
@@ -217,28 +356,57 @@ class CallDetectionService : Service(), TextToSpeech.OnInitListener {
             val messageJson = json.parseToJsonElement(text)
             val type = messageJson.jsonObject["type"]?.jsonPrimitive?.content
             
-            if (type == "transcript") {
-                val transcriptObj = messageJson.jsonObject["transcript"]?.jsonObject
-                val transcript = if (transcriptObj != null) {
-                    transcriptObj["transcript"]?.jsonPrimitive?.content ?: ""
-                } else {
-                    messageJson.jsonObject["transcript"]?.jsonPrimitive?.content ?: ""
+            Log.i(TAG, "Received Vapi Message Type: $type, Content: $text")
+            
+            if (type == "transcript" || type == "live-caption" || type == "LIVE_CAPTION") {
+                // Handle various transcript formats
+                val transcript = when {
+                    messageJson.jsonObject.containsKey("transcript") -> {
+                         val tObj = messageJson.jsonObject["transcript"]
+                         if (tObj is kotlinx.serialization.json.JsonObject) {
+                             tObj["transcript"]?.jsonPrimitive?.content ?: ""
+                         } else {
+                             tObj?.jsonPrimitive?.content ?: ""
+                         }
+                    }
+                    messageJson.jsonObject.containsKey("text") -> {
+                        messageJson.jsonObject["text"]?.jsonPrimitive?.content ?: ""
+                    }
+                    else -> ""
                 }
                 
                 if (transcript.isNotEmpty()) {
-                    Log.d(TAG, "Captured Transcript: $transcript")
+                    Log.d(TAG, "Captured Audio Text: $transcript")
+                    updateStatusNotification("Heard: \"$transcript\"")
                     
                     // Simple keyword detection for fraud alerts in transcript
                     // Using case-insensitive check and also searching for common scam keywords
-                    val scamKeywords = listOf("Warning", "चेतावनी", "OTAC", "OTP", "Bank", "Police", "Account", "Verify")
+                    // Added more keywords based on common scams
+                    val scamKeywords = listOf(
+                        "Warning", "Alert", "Fraud", "Scam",
+                        "chetaavani", "dhokha", // Hindi transliteration
+                        "OTAC", "OTP", "Pin", "Password", "CVV", 
+                        "Bank", "Police", "CBI", "RBI", "Customs", "Narcotics",
+                        "Account", "Verify", "Block", "Expiry", "Upgrade",
+                        "Hello", "Test" // For debugging purposes
+                    )
+                    
                     if (scamKeywords.any { transcript.contains(it, ignoreCase = true) }) {
-                        Log.w(TAG, "Scam keyword detected in transcript!")
+                        val detectedWord = scamKeywords.first { transcript.contains(it, ignoreCase = true) }
+                        Log.w(TAG, "Scam keyword detected locally: $detectedWord")
+                        
                         updateLogAndTriggerAlert(FraudDetectionResult(
                             isFraud = true, 
-                            confidence = 0.9f, 
-                            reason = "Scam pattern detected: $transcript"
+                            confidence = 0.85f, // Slightly lower confidence for local keyword match
+                            reason = "Suspicious keyword detected: $detectedWord"
                         ))
                     }
+                    
+                    // Broadcast transcript to UI
+                    val intent = Intent(ACTION_TRANSCRIPT_UPDATE).apply {
+                        putExtra(EXTRA_TRANSCRIPT, transcript)
+                    }
+                    sendBroadcast(intent)
                 }
             } else if (type == "FRAUD_ALERT") {
                 val keywords = messageJson.jsonObject["keywords"]?.let {
@@ -277,6 +445,18 @@ class CallDetectionService : Service(), TextToSpeech.OnInitListener {
                 Log.e(TAG, "Vapi Error: $error")
             }
         } catch (e: Exception) {}
+    }
+
+    private fun updateLogWithPhoneNumber(number: String) {
+        serviceScope.launch {
+            if (currentCallLogId != -1) {
+                val currentRecord = callLogDao.getLogById(currentCallLogId)
+                currentRecord?.let {
+                    callLogDao.updateLog(it.copy(phoneNumber = number))
+                    Log.d(TAG, "Updated log record with real phone number: $number")
+                }
+            }
+        }
     }
 
     private fun updateStatusNotification(status: String) {
@@ -332,6 +512,31 @@ class CallDetectionService : Service(), TextToSpeech.OnInitListener {
         
         // 3. Show actionable notification
         showFraudNotification(result)
+        
+        // 4. Show Overlay Popup (Instant & High Priority)
+        // Deduplicate: Only show if not already shown for this call
+        if (!fraudPopupShown) {
+            fraudPopupShown = true
+            showFraudPopup(result)
+        }
+    }
+    
+    private fun showFraudPopup(result: FraudDetectionResult) {
+        try {
+            val intent = Intent(this, FraudAlertActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                // Add these flags to ensure it shows over lockscreen/other apps
+                addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                addFlags(Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS)
+                
+                putExtra(EXTRA_FRAUD_REASON, result.reason)
+                putExtra(EXTRA_FRAUD_CONFIDENCE, result.confidence)
+            }
+            startActivity(intent)
+            Log.d(TAG, "Launched FraudAlertActivity overlay")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to launch FraudAlertActivity: ${e.message}")
+        }
     }
 
     private fun triggerVibration() {
@@ -347,7 +552,11 @@ class CallDetectionService : Service(), TextToSpeech.OnInitListener {
         val pattern = longArrayOf(0, 500, 200, 500, 200, 500)
         
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            vibrator.vibrate(VibrationEffect.createWaveform(pattern, -1))
+             val audioAttributes = android.media.AudioAttributes.Builder()
+                .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .setUsage(android.media.AudioAttributes.USAGE_ALARM)
+                .build()
+            vibrator.vibrate(VibrationEffect.createWaveform(pattern, -1), audioAttributes)
         } else {
             @Suppress("DEPRECATION")
             vibrator.vibrate(pattern, -1)
@@ -427,6 +636,15 @@ class CallDetectionService : Service(), TextToSpeech.OnInitListener {
         audioRecord = null
         webSocket?.close(1000, "Recording stopped")
         webSocket = null
+        
+        try {
+            if (wakeLock?.isHeld == true) {
+                wakeLock?.release()
+                Log.d(TAG, "WakeLock released")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error releasing WakeLock: ${e.message}")
+        }
     }
 
     override fun onDestroy() {
@@ -478,6 +696,7 @@ class CallDetectionService : Service(), TextToSpeech.OnInitListener {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("CyberSmith Call Protection")
             .setContentText(status)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(status)) // Allow longer text for transcripts
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
@@ -494,8 +713,10 @@ class CallDetectionService : Service(), TextToSpeech.OnInitListener {
         const val ACTION_START_RECORDING = "com.example.cybersmith.action.START_RECORDING"
         const val ACTION_STOP_RECORDING = "com.example.cybersmith.action.STOP_RECORDING"
         const val ACTION_FRAUD_DETECTED = "com.example.cybersmith.action.FRAUD_DETECTED"
+        const val ACTION_TRANSCRIPT_UPDATE = "com.example.cybersmith.action.TRANSCRIPT_UPDATE"
         const val EXTRA_PHONE_NUMBER = "com.example.cybersmith.extra.PHONE_NUMBER"
         const val EXTRA_FRAUD_REASON = "com.example.cybersmith.extra.FRAUD_REASON"
         const val EXTRA_FRAUD_CONFIDENCE = "com.example.cybersmith.extra.FRAUD_CONFIDENCE"
+        const val EXTRA_TRANSCRIPT = "com.example.cybersmith.extra.TRANSCRIPT"
     }
 }
